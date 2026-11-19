@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>mesh_non_matching · 同一 mesh 在两个像素 grid 上的深度</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="./style.css" />
+  <!-- injected per port by server.mjs: window.__MESH_NON_MATCHING__ = { passIndex, port, mode, passCount } -->
+  <script src="./config.js"></script>
+</head>
+<body data-engine-state="booting">
+  <main id="layout">
+    <div id="stage">
+      <canvas id="viewport"></canvas>
+      <div id="probe-marker" hidden></div>
+      <div id="webgl-badge">webgl</div>
+    </div>
+
+    <aside id="hud">
+      <h1>mesh_non_matching</h1>
+      <p class="subtitle">同一个三角形 · 6 趟 pass（4 个端口）· 颜色 = 深度的 24bit 位打包</p>
+
+      <dl>
+        <dt>当前端口</dt><dd id="hud-port">-</dd>
+        <dt>当前 pass</dt><dd id="hud-pass">-</dd>
+        <dt>输出口径</dt><dd id="hud-kind">-</dd>
+        <dt>viewport</dt><dd id="hud-grid">-</dd>
+        <dt>light eye (绕 X)</dt><dd id="hud-eye-light-x">-</dd>
+        <dt>light eye (绕 Y)</dt><dd id="hud-eye-light-y">-</dd>
+        <dt>camera eye</dt><dd id="hud-eye-camera">-</dd>
+        <dt>打包区间</dt><dd id="hud-range">-</dd>
+      </dl>
+      <p class="hint" id="hud-view-mode">-</p>
+
+      <h2>point light 视角旋转 <span id="angle-axis" class="axis-tag">绕 Y 轴</span></h2>
+      <div class="slider-row">
+        <input type="range" id="angle-slider" min="0" max="360" step="1" value="30" />
+        <output id="angle-value">30°</output>
+      </div>
+      <p class="hint">
+        滑块控制<b>本页这趟所属的那个旋转轴</b>（X 轴动 y/z，Y 轴动 x/z），两个轴各有自己的角度；camera 那趟不转。
+        拖动即时重渲染，锁定的探针会跟着刷新。
+      </p>
+
+
+      <section id="locator">
+        <h2>坐标 → 像素定位</h2>
+        <p class="hint">
+          手输坐标（不受画布上鼠标点选精度限制），全部 pass 的像素位置、覆盖情况、该像素反解出来的值都列在下面。
+          支持两种输入：<b>世界 XYZ</b> 或 <b>三角形平面坐标 (u, v)</b>（平面坐标换算出一定落在三角形所在平面上，便于按平面位置观测）。
+        </p>
+        <div class="buttons" id="locate-mode-buttons">
+          <button type="button" data-mode="world">世界 XYZ</button>
+          <button type="button" data-mode="plane">平面 (u, v)</button>
+        </div>
+        <form id="locate-form" autocomplete="off">
+          <div class="coord-group is-active" data-mode="world">
+            <label>X<input type="number" id="locate-x" step="0.001" value="0.017" /></label>
+            <label>Y<input type="number" id="locate-y" step="0.001" value="-0.107" /></label>
+            <label>Z<input type="number" id="locate-z" step="0.001" value="-0.017" /></label>
+          </div>
+          <div class="coord-group" data-mode="plane">
+            <label>u<input type="number" id="locate-u" step="0.001" value="0" disabled /></label>
+            <label>v<input type="number" id="locate-v" step="0.001" value="0" disabled /></label>
+          </div>
+          <button type="submit">定位</button>
+        </form>
+        <p class="hint" id="locate-mode-hint">-</p>
+        <div class="presets">
+          <button type="button" data-point="-0.95,-0.62,0">v0</button>
+          <button type="button" data-point="0.95,-0.62,-0.35">v1</button>
+          <button type="button" data-point="0.05,0.92,0.3">v2</button>
+          <button type="button" data-point="0.0167,-0.1067,-0.0167">重心</button>
+          <button type="button" data-point="0.35,0.1,0.2">平面外一点</button>
+        </div>
+        <table id="locate-table">
+          <colgroup>
+            <col class="c-pass" /><col class="c-px" /><col class="c-cover" />
+            <col class="c-value" /><col class="c-analytic" /><col class="c-diff" />
+          </colgroup>
+          <thead>
+            <tr><th>pass</th><th>像素 float</th><th>覆盖</th><th>读回</th><th>解析</th><th>差</th></tr>
+          </thead>
+          <tbody id="locate-body"></tbody>
+        </table>
+        <p class="hint" id="locate-note">-</p>
+        <p class="hint">读回值取的是<b>最近像素中心</b>上的值，所以和"该点解析值"之间会有一个最多约 0.7 像素采样位移的差；想对齐就把坐标输到某个像素中心对应的世界点上。</p>
+      </section>
+
+
+      <section id="aggregate">
+        <h2>同 texel 总表（camera 中心 32×32）</h2>
+        <p class="hint">
+          按当前成像状态采样 camera 中心 32×32 像素的 fragment，把每个 fragment 的世界坐标投到 light 空间，
+          按 light texel 归组：<b>z in light NDC 相同的记录就是落在同一个 texel 里的 fragment</b>，
+          最右列给出这些 fragment 在 camera 屏幕上的位置。
+        </p>
+        <div class="buttons" id="agg-axis-buttons">
+          <button type="button" data-light="lightY">绕 Y（#2/#3）</button>
+          <button type="button" data-light="lightX">绕 X（#4/#5）</button>
+        </div>
+        <p class="hint" id="agg-summary">-</p>
+        <table id="agg-table">
+          <colgroup>
+            <col class="c-texel" /><col class="c-z" /><col class="c-range" /><col class="c-count" /><col class="c-loc" />
+          </colgroup>
+          <thead>
+            <tr><th>light texel</th><th>z in light NDC</th><th>cam 片元 z</th><th>#frag</th><th>camera 屏幕位置</th></tr>
+          </thead>
+          <tbody id="agg-body"></tbody>
+        </table>
+        <p class="hint" id="agg-note">-</p>
+        <button type="button" id="agg-export">导出 TSV（全部 fragment 记录）</button>
+        <textarea id="agg-tsv" readonly spellcheck="false" placeholder="点上面的按钮，TSV 内容也会出现在这里"></textarea>
+      </section>
+
+      <h2>跨 pass 探针（鼠标）</h2>
+      <p class="hint">鼠标移到画面上实时探测，点击锁定 / 再点取消。</p>
+      <dl>
+        <dt>本帧像素</dt><dd id="probe-a">-</dd>
+        <dt>解出值</dt><dd id="probe-value">-</dd>
+        <dt>世界坐标</dt><dd id="probe-world">-</dd>
+        <dt>该点 lightMVP z</dt><dd id="probe-light-z">-</dd>
+        <dt>配对帧像素</dt><dd id="probe-b">-</dd>
+        <dt>配对帧值</dt><dd id="probe-value-b">-</dd>
+        <dt>差值</dt><dd id="probe-delta">-</dd>
+      </dl>
+      <p class="hint" id="probe-note">-</p>
+
+      <h2>两张 grid 的解码预览</h2>
+      <div id="previews">
+        <figure>
+          <canvas id="preview-a" width="320" height="240"></canvas>
+          <figcaption id="caption-a">grid A</figcaption>
+        </figure>
+        <figure>
+          <canvas id="preview-b" width="320" height="240"></canvas>
+          <figcaption id="caption-b">grid B</figcaption>
+        </figure>
+      </div>
+      <p class="hint">
+        灰度图是用<b>解码出来的深度值</b>重画的（不是另一次渲染）；青色十字 = 探针所在像素，黄色十字 = 同一个深度值落在另一张 grid 的位置。
+      </p>
+
+      <h2>各趟 pass</h2>
+      <ul>
+        <li><b>#2</b>（8773）camera 光栅化 → <code>lightMVP(绕 Y)</code> 的 z（NDC）</li>
+        <li><b>#3</b>（8774）light 光栅化 → <code>lightMVP(绕 Y)</code> 的 z（NDC）</li>
+        <li><b>#4</b>（8771）camera 光栅化 → <code>lightMVP(绕 X)</code> 的 z（NDC）</li>
+        <li><b>#5</b>（8772）light 光栅化 → <code>lightMVP(绕 X)</code> 的 z（NDC）</li>
+        <li><b>#0 / #1</b>（无端口）light / camera 光栅化 → 世界坐标深度，留作核对与定位表用</li>
+      </ul>
+      <p class="hint">#2↔#3、#4↔#5 各自输出同一个量，区别只在“谁光栅化出来的 fragment”，对比就是 non-matching。</p>
+
+      <h2>说明</h2>
+      <ul>
+        <li>mesh 就是参数文件里写死的 3 个顶点，没有任何几何生成。</li>
+        <li>所有 pass 用同一份顶点 / 同一个 M / 同一个 P，viewport 都是 180×180。</li>
+        <li>两个 light 视角的基准 eye 与 camera 相同（见 <code>src/mesh-params.mjs</code> 的 <code>VIEWS</code>）：一个绕 X 转（动 y/z），一个绕 Y 转（动 x/z），角度各自可调；camera 不转。</li>
+        <li>片元颜色 = 值的 24bit 定点打包，alpha = 有没有 fragment；读回像素就能反解成数值。</li>
+        <li>每趟 pass 在 draw 之前都 <code>await</code> 了对应 MeshRender 的 <code>ready()</code>。</li>
+        <li>静态一帧，没有 mainloop。</li>
+      </ul>
+    </aside>
+  </main>
+
+  <pre id="error" hidden></pre>
+
+  <script type="module" src="./src/engine.mjs"></script>
+</body>
+</html>
